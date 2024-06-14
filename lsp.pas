@@ -259,6 +259,7 @@ var
 begin
   Input := specialize TLSPStreaming<T>.ToObject(Params);
   Process(Input);
+  Result := nil;
 end;
 
 { TLSPDispatcher }
