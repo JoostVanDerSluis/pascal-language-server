@@ -66,6 +66,10 @@ const InvokeRemoveUnusedUnitsCommand = 'invoke.removeUnusedUnits';
 const InactiveRegionNotification: NotificationType<InactiveRegionParams> = new NotificationType<InactiveRegionParams>('pasls.inactiveRegions');
 
 const FpcTaskType = 'fpc';
+const FpmakeTaskType = 'fpmake';
+
+const FppkgActions = ['build', 'compile', 'clean', 'archive'] as const;
+type FppkgAction = (typeof FppkgActions)[number];
 
 interface FpcTaskDefinition extends TaskDefinition {
 	type: typeof FpcTaskType;
@@ -76,6 +80,73 @@ interface FpcTaskDefinition extends TaskDefinition {
 	env?: { [key: string]: string };
 }
 
+interface FpmakeTaskDefinition extends TaskDefinition {
+	type: typeof FpmakeTaskType;
+	fppkg?: string;
+	/** fppkg subcommand (defaults to `compile`). */
+	action?: FppkgAction;
+	/** Additional arguments passed to fppkg after the action. */
+	args?: string[];
+	cwd?: string;
+	env?: { [key: string]: string };
+}
+
+/** Explicit `cwd` in the task definition, else the task’s workspace folder when applicable (same as `resolveFpcTask`). */
+function resolveTaskCwd(task: Task, cwdFromDefinition?: string): string | undefined {
+	if (cwdFromDefinition !== undefined && cwdFromDefinition.length > 0) {
+		return cwdFromDefinition;
+	}
+	if (task.scope && task.scope !== TaskScope.Global && task.scope !== TaskScope.Workspace) {
+		const folder = task.scope as WorkspaceFolder;
+		if (folder.uri && folder.uri.scheme === 'file') {
+			return folder.uri.fsPath;
+		}
+	}
+	return undefined;
+}
+
+function resolveFpmakeAction(def: FpmakeTaskDefinition): FppkgAction {
+	if (def.action !== undefined && (FppkgActions as readonly string[]).includes(def.action)) {
+		return def.action;
+	}
+	return 'compile';
+}
+
+/** Last path segment of the directory (folder name). */
+function fpmakeDirectoryLabel(dirFsPath: string): string {
+	return path.basename(dirFsPath);
+}
+
+function resolveFpmakeTask(task: Task, _token: CancellationToken): ProviderResult<Task> {
+	const def = task.definition as FpmakeTaskDefinition;
+	if (def.type !== FpmakeTaskType) {
+		return undefined;
+	}
+	let cwd = resolveTaskCwd(task, def.cwd);
+	if (cwd === undefined) {
+		return undefined;
+	}
+	const fppkgExe = def.fppkg && def.fppkg.length > 0 ? def.fppkg : 'fppkg';
+	const action = resolveFpmakeAction(def);
+	const fppkgArgs = [action, ...(def.args || [])];
+	const envKeys = def.env ? Object.keys(def.env) : [];
+	let execOptions: ProcessExecutionOptions | undefined;
+	if (envKeys.length > 0) {
+		execOptions = { cwd, env: { ...process.env, ...def.env } as { [key: string]: string } };
+	} else {
+		execOptions = { cwd };
+	}
+	const execution = new ProcessExecution(fppkgExe, fppkgArgs, execOptions);
+	return new Task(
+		def,
+		task.scope ?? TaskScope.Workspace,
+		task.name,
+		'fpmake',
+		execution,
+		task.problemMatchers
+	);
+}
+
 function resolveFpcTask(task: Task, _token: CancellationToken): ProviderResult<Task> {
 	const def = task.definition as FpcTaskDefinition;
 	if (def.type !== FpcTaskType || !def.program) {
@@ -83,15 +154,7 @@ function resolveFpcTask(task: Task, _token: CancellationToken): ProviderResult<T
 	}
 	const compiler = def.compiler && def.compiler.length > 0 ? def.compiler : 'fpc';
 	const args = [...(def.args || []), def.program];
-	let cwd: string | undefined;
-	if (def.cwd !== undefined && def.cwd.length > 0) {
-		cwd = def.cwd;
-	} else if (task.scope && task.scope !== TaskScope.Global && task.scope !== TaskScope.Workspace) {
-		const folder = task.scope as WorkspaceFolder;
-		if (folder.uri && folder.uri.scheme === 'file') {
-			cwd = folder.uri.fsPath;
-		}
-	}
+	const cwd = resolveTaskCwd(task, def.cwd);
 	const envKeys = def.env ? Object.keys(def.env) : [];
 	let execOptions: ProcessExecutionOptions | undefined;
 	if (cwd !== undefined || envKeys.length > 0) {
@@ -443,6 +506,61 @@ export function activate(context: ExtensionContext) {
 		}
 	});
 	context.subscriptions.push(fpcTaskProvider);
+
+	const fpmakeTaskProvider = tasks.registerTaskProvider(FpmakeTaskType, {
+		provideTasks(token: CancellationToken): ProviderResult<Task[]> {
+			const folders = workspace.workspaceFolders;
+			if (!folders || folders.length === 0) {
+				return [];
+			}
+			const contributed: Task[] = [];
+			const seenDirs = new Set<string>();
+
+			const tryAddFpmakeDir = (dirFsPath: string) => {
+				const norm = path.normalize(dirFsPath);
+				if (seenDirs.has(norm)) {
+					return;
+				}
+				const fpmakePath = path.join(norm, 'fpmake.pp');
+				if (!fs.existsSync(fpmakePath)) {
+					return;
+				}
+				const scopeFolder = workspace.getWorkspaceFolder(Uri.file(fpmakePath));
+				if (!scopeFolder) {
+					return;
+				}
+				seenDirs.add(norm);
+				const dirLabel = fpmakeDirectoryLabel(norm);
+				const def: FpmakeTaskDefinition = {
+					type: FpmakeTaskType,
+					cwd: norm,
+					action: 'compile'
+				};
+				const stubTask = new Task(def, scopeFolder, dirLabel, 'fpmake', undefined, []);
+				const resolved = resolveFpmakeTask(stubTask, token) as Task | undefined;
+				if (resolved) {
+					contributed.push(resolved);
+				}
+			};
+
+			for (const folder of folders) {
+				tryAddFpmakeDir(folder.uri.fsPath);
+			}
+
+			const active = window.activeTextEditor?.document;
+			if (active && !active.isUntitled && active.uri.scheme === 'file') {
+				if (path.basename(active.uri.fsPath) === 'fpmake.pp') {
+					tryAddFpmakeDir(path.dirname(active.uri.fsPath));
+				}
+			}
+
+			return contributed;
+		},
+		resolveTask(task: Task, token: CancellationToken): ProviderResult<Task> {
+			return resolveFpmakeTask(task, token);
+		}
+	});
+	context.subscriptions.push(fpmakeTaskProvider);
 
         /* Register formatting provider registration*/
 

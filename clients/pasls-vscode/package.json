@@ -18,7 +18,8 @@
 	},
 	"activationEvents": [
 		"onLanguage:pascal",
-		"onTaskType:fpc"
+		"onTaskType:fpc",
+		"onTaskType:fpmake"
 	],
 	"main": "./out/extension",
 	"contributes": {
@@ -46,11 +47,11 @@
         "command" : "invoke.invertAssignment",
 				"title" : "Invert the assignment statements in the selection"
 				},
-			{	
+			{
         "command" : "invoke.removeEmptyMethods",
 				"title" : "Remove empty methods from classes in this file"
 		  },
-			{	
+			{
         "command" : "invoke.removeUnusedUnits",
 				"title" : "Remove unused units from the uses clauses in this file"
 		  }
@@ -88,6 +89,44 @@
 					"cwd": {
 						"type": "string",
 						"markdownDescription": "Working directory for the compiler. Supports VS Code variables (e.g. `${workspaceFolder}`). If omitted, the task’s workspace folder is used when available."
+					},
+					"env": {
+						"type": "object",
+						"additionalProperties": {
+							"type": "string"
+						},
+						"markdownDescription": "Environment variables merged with the process environment (later entries override existing ones)."
+					}
+				}
+			},
+			{
+				"type": "fpmake",
+				"properties": {
+					"fppkg": {
+						"type": "string",
+						"description": "Path to the fppkg executable (defaults to `fppkg` on PATH, same as the `compiler` property on the `fpc` task)."
+					},
+					"action": {
+						"type": "string",
+						"enum": [
+							"build",
+							"compile",
+							"clean",
+							"archive"
+						],
+						"default": "compile",
+						"description": "fppkg action (subcommand before any extra arguments)."
+					},
+					"args": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "Additional arguments passed to fppkg after the action."
+					},
+					"cwd": {
+						"type": "string",
+						"markdownDescription": "Working directory for the fppkg executable. Supports VS Code variables (e.g. `${workspaceFolder}`). If omitted, the task’s workspace folder is used when available."
 					},
 					"env": {
 						"type": "object",
