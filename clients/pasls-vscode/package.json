@@ -17,7 +17,8 @@
 		"vscode": "^1.43.0"
 	},
 	"activationEvents": [
-		"onLanguage:pascal"
+		"onLanguage:pascal",
+		"onTaskType:fpc"
 	],
 	"main": "./out/extension",
 	"contributes": {
@@ -60,8 +61,44 @@
 					"command": "invoke.codeCompletion",
 					"key": "ctrl+shift+c"
 			}
-			
-	  ],  		
+
+	  ],
+		"taskDefinitions": [
+			{
+				"type": "fpc",
+				"required": [
+					"program"
+				],
+				"properties": {
+					"program": {
+						"type": "string",
+						"description": "Path to the main Pascal source file (.pas, .lpr, .pp) to compile."
+					},
+					"compiler": {
+						"type": "string",
+						"description": "Free Pascal compiler executable (defaults to `fpc` on PATH)."
+					},
+					"args": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "Extra arguments passed to the compiler after the program path."
+					},
+					"cwd": {
+						"type": "string",
+						"markdownDescription": "Working directory for the compiler. Supports VS Code variables (e.g. `${workspaceFolder}`). If omitted, the task’s workspace folder is used when available."
+					},
+					"env": {
+						"type": "object",
+						"additionalProperties": {
+							"type": "string"
+						},
+						"markdownDescription": "Environment variables merged with the process environment (later entries override existing ones)."
+					}
+				}
+			}
+		],
 		"configuration": {
 			"type": "object",
 			"title": "Pascal Language Server",

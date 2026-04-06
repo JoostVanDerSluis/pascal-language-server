@@ -1,6 +1,6 @@
 'use strict';
 
-// import * as path from 'path';
+import * as path from 'path';
 // import * as fs from 'fs';
 
 import {
@@ -22,7 +22,14 @@ import {
 	Command,
 	TextEditorDecorationType,
 	DecorationRangeBehavior,
-	
+	tasks,
+	Task,
+	TaskScope,
+	TaskDefinition,
+	ProcessExecution,
+	ProcessExecutionOptions,
+	ProviderResult,
+	CancellationToken,
 } from 'vscode';
 import {
 	Executable,
@@ -34,7 +41,7 @@ import {
 import { StreamMessageReader, StreamMessageWriter } from 'vscode-languageserver-protocol';
 import * as fs from 'fs';
 import * as net from 'net';
-import { 
+import {
 	InputRegion ,
 	DecorationRangesPair,
    InactiveRegionParams
@@ -49,8 +56,8 @@ const InvokeFormatCommand = 'invoke.formatCode';
 const InvertAssignmentCommand = 'pasls.invertAssignment';
 const InvokeInvertAssignmentCommand = 'invoke.invertAssignment';
 
-const RemoveEmptyMethodsCommand = 'pasls.removeEmptyMethods'; 
-const InvokeRemoveEmptyMethodsCommand = 'invoke.removeEmptyMethods'; 
+const RemoveEmptyMethodsCommand = 'pasls.removeEmptyMethods';
+const InvokeRemoveEmptyMethodsCommand = 'invoke.removeEmptyMethods';
 
 const RemoveUnusedUnitsCommand = 'pasls.removeUnusedUnits';
 const InvokeRemoveUnusedUnitsCommand = 'invoke.removeUnusedUnits';
@@ -58,11 +65,84 @@ const InvokeRemoveUnusedUnitsCommand = 'invoke.removeUnusedUnits';
 // const InactiveRegionNotification = 'pasls.inactiveRegions';
 const InactiveRegionNotification: NotificationType<InactiveRegionParams> = new NotificationType<InactiveRegionParams>('pasls.inactiveRegions');
 
+const FpcTaskType = 'fpc';
+
+interface FpcTaskDefinition extends TaskDefinition {
+	type: typeof FpcTaskType;
+	program: string;
+	compiler?: string;
+	args?: string[];
+	cwd?: string;
+	env?: { [key: string]: string };
+}
+
+function resolveFpcTask(task: Task, _token: CancellationToken): ProviderResult<Task> {
+	const def = task.definition as FpcTaskDefinition;
+	if (def.type !== FpcTaskType || !def.program) {
+		return undefined;
+	}
+	const compiler = def.compiler && def.compiler.length > 0 ? def.compiler : 'fpc';
+	const args = [...(def.args || []), def.program];
+	let cwd: string | undefined;
+	if (def.cwd !== undefined && def.cwd.length > 0) {
+		cwd = def.cwd;
+	} else if (task.scope && task.scope !== TaskScope.Global && task.scope !== TaskScope.Workspace) {
+		const folder = task.scope as WorkspaceFolder;
+		if (folder.uri && folder.uri.scheme === 'file') {
+			cwd = folder.uri.fsPath;
+		}
+	}
+	const envKeys = def.env ? Object.keys(def.env) : [];
+	let execOptions: ProcessExecutionOptions | undefined;
+	if (cwd !== undefined || envKeys.length > 0) {
+		execOptions = {};
+		if (cwd !== undefined) {
+			execOptions.cwd = cwd;
+		}
+		if (envKeys.length > 0) {
+			execOptions.env = { ...process.env, ...def.env } as { [key: string]: string };
+		}
+	}
+	const execution = new ProcessExecution(compiler, args, execOptions);
+	return new Task(
+		def,
+		task.scope ?? TaskScope.Workspace,
+		task.name,
+		'fpc',
+		execution,
+		task.problemMatchers
+	);
+}
+
+function isPascalProgamDocument(doc: TextDocument): boolean {
+	if (doc.languageId === 'pascal') {
+		return true;
+	}
+	const ext = path.extname(doc.uri.fsPath).toLowerCase();
+	return ext === '.pas' || ext === '.pp' || ext === '.lpr';
+}
+
+function getContributedFpcProgramForFolder(folder: WorkspaceFolder): { program: string; taskName: string } {
+	const editor = window.activeTextEditor;
+	const doc = editor && editor.document;
+	if (doc && doc.uri.scheme === 'file' && isPascalProgamDocument(doc)) {
+		const owner = workspace.getWorkspaceFolder(doc.uri);
+		if (owner && owner.uri.toString() === folder.uri.toString()) {
+			const base = path.basename(doc.uri.fsPath);
+			return { program: doc.uri.fsPath, taskName: `compile ${base}` };
+		}
+	}
+	return {
+		program: path.join(folder.uri.fsPath, 'project.lpr'),
+		taskName: 'compile project.lpr'
+	};
+}
+
 let client: LanguageClient;
 let completecmd: Command;
 let inactiveRegionsDecorations = new Map<string, DecorationRangesPair>();
 let tcpSocket: net.Socket | undefined;
-    
+
 function invokeFormat(document: TextDocument, range: Range) {
 	let activeEditor = window.activeTextEditor;
 	if (!activeEditor) {
@@ -81,7 +161,7 @@ function invokeFormat(document: TextDocument, range: Range) {
 		window.showErrorMessage('Documents needs to be saved first.')
 		return;
 	}
-	// Maybe check for extensions ? 
+	// Maybe check for extensions ?
 	if (doc.isDirty) doc.save();
 
 	let formatConfig: string = workspace.getConfiguration('pascalLanguageServer').get('formatConfig') || '';
@@ -104,7 +184,7 @@ function invokeRemoveEmptyMethods() {
 	if (!activeEditor) {
 		return;
 	}
-	
+
 	let doc : TextDocument = activeEditor.document;
 	if (!doc) {
 		window.showErrorMessage('No document available.')
@@ -112,7 +192,7 @@ function invokeRemoveEmptyMethods() {
 	}
 
 	let pos : Position = activeEditor.selection.start;
-	
+
 	if (doc.uri) {
 		commands.executeCommand(RemoveEmptyMethodsCommand, doc.uri.with({ "scheme": "file" }).toString(), pos);
 	}
@@ -127,7 +207,7 @@ function invokeRemoveUnusedUnits() {
         return;
     }
     let doc : TextDocument = activeEditor.document;
-        
+
     if (!doc) {
         window.showErrorMessage('No document available.');
         return;
@@ -152,10 +232,10 @@ function invokeInvertAssignment(document: TextDocument, range: Range) {
 		window.showErrorMessage('No document available.')
 		return;
 	}
-	
+
 	if (doc.uri) {
 		commands.executeCommand(InvertAssignmentCommand, doc.uri.with({ "scheme": "file" }).toString(), sPos, ePos);
-	}	
+	}
 }
 
 function setInactiveRegion(params: InactiveRegionParams) {
@@ -337,6 +417,33 @@ export function activate(context: ExtensionContext) {
 
 	context.subscriptions.push(completecmd);
 
+	const fpcTaskProvider = tasks.registerTaskProvider(FpcTaskType, {
+		provideTasks(token: CancellationToken): ProviderResult<Task[]> {
+			const folders = workspace.workspaceFolders;
+			if (!folders || folders.length === 0) {
+				return [];
+			}
+			const contributed: Task[] = [];
+			for (const folder of folders) {
+				const { program, taskName } = getContributedFpcProgramForFolder(folder);
+				const def: FpcTaskDefinition = {
+					type: FpcTaskType,
+					program
+				};
+				const stubTask = new Task(def, folder, taskName, 'fpc', undefined, []);
+				const resolved = resolveFpcTask(stubTask, token) as Task | undefined;
+				if (resolved) {
+					contributed.push(resolved);
+				}
+			}
+			return contributed;
+		},
+		resolveTask(task: Task, token: CancellationToken): ProviderResult<Task> {
+			return resolveFpcTask(task, token);
+		}
+	});
+	context.subscriptions.push(fpcTaskProvider);
+
         /* Register formatting provider registration*/
 
 	languages.registerDocumentFormattingEditProvider('pascal', {
@@ -344,10 +451,10 @@ export function activate(context: ExtensionContext) {
 			invokeFormat(document,new Range(new Position(0,0), new Position(document.lineCount,0)));
 			return [];
 		}
-	});	
+	});
 
 	/* Format Code  command  */
-	
+
 	const formatcmd = commands.registerCommand(InvokeFormatCommand, invokeFormat)
 
 	context.subscriptions.push(formatcmd);
@@ -363,7 +470,7 @@ export function activate(context: ExtensionContext) {
 	const removeemptymethodscmd = commands.registerCommand(InvokeRemoveEmptyMethodsCommand, invokeRemoveEmptyMethods)
 
 	context.subscriptions.push(removeemptymethodscmd);
-	
+
 
 }
 
